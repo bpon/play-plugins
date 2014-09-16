@@ -17,10 +17,13 @@ libraryDependencies ++= Seq(
   "biz.source_code"           %  "base64coder"        % "2010-12-19",
   "com.typesafe.play"         %% "play-cache"         % "2.3.0",
   "com.typesafe.play.plugins" %% "play-plugins-util"  % "2.3.0",
-  "org.sedis"                 %  "sedis_2.10.0"       % "1.1.1"
+  "redis.clients"             %  "jedis"              % "2.5.2"
 )
 
-resolvers += "pk11 repo" at "http://pk11-scratch.googlecode.com/svn/trunk"
+resolvers ++= Seq(
+  "pk11 repo" at "http://pk11-scratch.googlecode.com/svn/trunk",
+  "maven central" at "http://repo1.maven.org/maven2"
+)
 
 publishTo <<= (version) { version: String =>
   val nexus = "https://private-repo.typesafe.com/typesafe/"

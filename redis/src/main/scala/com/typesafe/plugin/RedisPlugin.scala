@@ -1,17 +1,13 @@
 package com.typesafe.plugin
 
 import play.api._
-import org.sedis._
 import redis.clients.jedis._
 import play.api.cache._
-import java.util._
 import java.io._
-import java.net.URI
 import biz.source_code.base64Coder._
-import org.apache.commons.lang3.builder._
 import play.api.mvc.Result
 import scala.concurrent.ExecutionContext.Implicits.global
-import org.apache.commons.pool.impl.GenericObjectPool
+import scala.collection.JavaConversions._
 
 /**
  * provides a redis client and a CachePlugin implementation
@@ -21,72 +17,27 @@ import org.apache.commons.pool.impl.GenericObjectPool
  */
 class RedisPlugin(app: Application) extends CachePlugin {
 
- private lazy val redisUri = app.configuration.getString("redis.uri").map { new URI(_) }
+  private lazy val port = app.configuration.getInt("redis.port") getOrElse 6379
 
- private lazy val host = app.configuration.getString("redis.host")
-                         .orElse(redisUri.map{_.getHost()})
-                         .getOrElse("localhost")
-
- private lazy val port = app.configuration.getInt("redis.port")
-                         .orElse(redisUri.map{_.getPort()}.filter{_ != -1})
-                         .getOrElse(6379)
-
- private lazy val password = app.configuration.getString("redis.password")
-                            .orElse(redisUri.map{ _.getUserInfo() }.filter{_ != null}.filter{ _ contains ":" }.map{_.split(":", 2)(1)})
-                            .getOrElse(null)
-
- private lazy val timeout = app.configuration.getInt("redis.timeout")
-                            .getOrElse(2000)
-
- private lazy val database = app.configuration.getInt("redis.database")
-                          	.getOrElse(0)
-
-
- /**
-  * provides access to the underlying jedis Pool
-  */
- lazy val jedisPool = {
-   val poolConfig = createPoolConfig(app)
-   Logger.info(s"Redis Plugin enabled. Connecting to Redis on ${host}:${port} to ${database} with timeout ${timeout}.")
-   Logger.info("Redis Plugin pool configuration: " + new ReflectionToStringBuilder(poolConfig).toString())
-   new JedisPool(poolConfig, host, port, timeout, password, database)
- }
-
-  /**
-  * provides access to the sedis Pool
-  */
- lazy val sedisPool = new Pool(jedisPool)
-
- private def createPoolConfig(app: Application) : JedisPoolConfig = {
-   val poolConfig : JedisPoolConfig = new JedisPoolConfig()
-   app.configuration.getInt("redis.pool.maxIdle").map { poolConfig.maxIdle = _ }
-   app.configuration.getInt("redis.pool.minIdle").map { poolConfig.minIdle = _ }
-   app.configuration.getInt("redis.pool.maxActive").map { poolConfig.maxActive = _ }
-   app.configuration.getInt("redis.pool.maxWait").map { poolConfig.maxWait = _ }
-   app.configuration.getBoolean("redis.pool.testOnBorrow").map { poolConfig.testOnBorrow = _ }
-   app.configuration.getBoolean("redis.pool.testOnReturn").map { poolConfig.testOnReturn = _ }
-   app.configuration.getBoolean("redis.pool.testWhileIdle").map { poolConfig.testWhileIdle = _ }
-   app.configuration.getLong("redis.pool.timeBetweenEvictionRunsMillis").map { poolConfig.timeBetweenEvictionRunsMillis = _ }
-   app.configuration.getInt("redis.pool.numTestsPerEvictionRun").map { poolConfig.numTestsPerEvictionRun = _ }
-   app.configuration.getLong("redis.pool.minEvictableIdleTimeMillis").map { poolConfig.minEvictableIdleTimeMillis = _ }
-   app.configuration.getLong("redis.pool.softMinEvictableIdleTimeMillis").map { poolConfig.softMinEvictableIdleTimeMillis = _ }
-   app.configuration.getBoolean("redis.pool.lifo").map { poolConfig.lifo = _ }
-    app.configuration.getString("redis.pool.whenExhaustedAction").map { setting =>
-      poolConfig.whenExhaustedAction = setting match {
-        case "fail"  | "0" => GenericObjectPool.WHEN_EXHAUSTED_FAIL
-        case "block" | "1" => GenericObjectPool.WHEN_EXHAUSTED_BLOCK
-        case "grow"  | "2" => GenericObjectPool.WHEN_EXHAUSTED_FAIL
+  //host:port
+  private lazy val hosts = app.configuration.getString("redis.hosts") map {
+    _.split(",") map {
+      _.split(":", 2) match {
+        case Array(h, p) => new HostAndPort(h.trim(), p.trim().toInt)
+        case Array(h) => new HostAndPort(h.trim(), port)
       }
-    }
-   poolConfig
- }
+    } toSet
+  } getOrElse Set(new HostAndPort("localhost", port))
+
+  private lazy val timeout = app.configuration.getInt("redis.timeout") getOrElse 2000
+
+  lazy val jedis = new JedisCluster(hosts, timeout)
 
  override def onStart() {
-    sedisPool
+    jedis
  }
 
  override def onStop() {
-    jedisPool.destroy()
  }
 
  override lazy val enabled = {
@@ -147,10 +98,8 @@ class RedisPlugin(app: Application) extends CachePlugin {
        val redisV = prefix + "-" + new String( Base64Coder.encode( baos.toByteArray() ) )
        Logger.trace(s"Setting key ${key} to ${redisV}")
        
-       sedisPool.withJedisClient { client =>
-          client.set(key,redisV)
-          if (expiration != 0) client.expire(key,expiration)
-       }
+       jedis.set(key,redisV)
+       if (expiration != 0) jedis.expire(key,expiration)
      } catch {case ex: IOException =>
        Logger.warn("could not serialize key:"+ key + " and value:"+ value.toString + " ex:"+ex.toString)
      } finally {
@@ -159,7 +108,7 @@ class RedisPlugin(app: Application) extends CachePlugin {
      }
 
     }
-    def remove(key: String): Unit =  sedisPool.withJedisClient { client => client.del(key) }
+    def remove(key: String): Unit =  jedis.del(key)
 
     class ClassLoaderObjectInputStream(stream:InputStream) extends ObjectInputStream(stream) {
       override protected def resolveClass(desc: ObjectStreamClass) = {
@@ -181,7 +130,7 @@ class RedisPlugin(app: Application) extends CachePlugin {
       Logger.trace(s"Reading key ${key}")
       
       try {
-        val rawData = sedisPool.withJedisClient { client => client.get(key) }
+        val rawData = jedis.get(key)
         rawData match {
           case null =>
             None
