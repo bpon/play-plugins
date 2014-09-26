@@ -34,12 +34,13 @@ class RedisPlugin(app: Application) extends CachePlugin {
 
   lazy val jedis = new JedisCluster(hosts, timeout)
 
- override def onStart() {
+  override def onStart() {
     jedis
- }
+  }
 
- override def onStop() {
- }
+  override def onStop(): Unit = {
+    jedis.close()
+  }
 
  override lazy val enabled = {
     !app.configuration.getString("redisplugin").filter(_ == "disabled").isDefined
