@@ -8,6 +8,7 @@ import biz.source_code.base64Coder._
 import play.api.mvc.Result
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.collection.JavaConversions._
+import scala.util.control.NonFatal
 
 /**
  * provides a redis client and a CachePlugin implementation
@@ -100,15 +101,20 @@ class RedisPlugin(app: Application) extends CachePlugin {
        
        jedis.set(key,redisV)
        if (expiration != 0) jedis.expire(key,expiration)
-     } catch {case ex: IOException =>
-       Logger.warn("could not serialize key:"+ key + " and value:"+ value.toString + " ex:"+ex.toString)
+     } catch {
+       case ex: IOException => Logger.warn("could not serialize key:"+ key + " and value:"+ value.toString + " ex:"+ex.toString)
+       case NonFatal(ex) => Logger.error("cache error", ex)
      } finally {
        if (oos != null) oos.close()
        if (dos != null) dos.close()
      }
 
     }
-    def remove(key: String): Unit =  jedis.del(key)
+    def remove(key: String): Unit = try {
+      jedis.del(key)
+    } catch {
+      case NonFatal(ex) => Logger.error("cache error", ex)
+    }
 
     class ClassLoaderObjectInputStream(stream:InputStream) extends ObjectInputStream(stream) {
       override protected def resolveClass(desc: ObjectStreamClass) = {
@@ -128,7 +134,7 @@ class RedisPlugin(app: Application) extends CachePlugin {
 
     def get(key: String): Option[Any] = {
       Logger.trace(s"Reading key ${key}")
-      
+
       try {
         val rawData = jedis.get(key)
         rawData match {
@@ -149,10 +155,13 @@ class RedisPlugin(app: Application) extends CachePlugin {
               case _ => throw new IOException("can not recognize value")
             }
         }
-      } catch {case ex: Exception =>
-        Logger.warn("could not deserialize key:"+ key+ " ex:"+ex.toString)
-        ex.printStackTrace()
-        None
+      } catch {
+        case ex: IOException =>
+          Logger.warn("could not deserialize key: "+ key, ex)
+          None
+        case NonFatal(ex) =>
+          Logger.error("cache error", ex)
+          None
       }
     }
 
