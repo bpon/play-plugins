@@ -1,5 +1,6 @@
 package com.typesafe.plugin
 
+import org.apache.commons.lang3.builder.ReflectionToStringBuilder
 import play.api._
 import redis.clients.jedis._
 import play.api.cache._
@@ -24,22 +25,54 @@ class RedisPlugin(app: Application) extends CachePlugin {
   private lazy val hosts = app.configuration.getString("redis.hosts") map {
     _.split(",") map {
       _.split(":", 2) match {
-        case Array(h, p) => new HostAndPort(h.trim(), p.trim().toInt)
-        case Array(h) => new HostAndPort(h.trim(), port)
+        case Array(h, p) => new JedisShardInfo(h.trim(), p.trim().toInt, timeout)
+        case Array(h) => new JedisShardInfo(h.trim(), port, timeout)
       }
-    } toSet
-  } getOrElse Set(new HostAndPort("localhost", port))
+    } toList
+  } getOrElse List(new JedisShardInfo("localhost", port, timeout))
 
   private lazy val timeout = app.configuration.getInt("redis.timeout") getOrElse 2000
 
-  lazy val jedis = new JedisCluster(hosts, timeout)
+  lazy val jedisPool = {
+    val poolConfig = createPoolConfig(app)
+    Logger.info(s"Redis Plugin enabled. Connecting to Redis on [${hosts.map(x => s"${x.getHost}:${x.getPort}").mkString(", ")}].")
+    Logger.info("Redis Plugin pool configuration: " + new ReflectionToStringBuilder(poolConfig).toString())
+    new ShardedJedisPool(poolConfig, hosts)
+  }
+
+  def withJedisClient[T](f: ShardedJedis => T): T = {
+    val jedis = jedisPool.getResource
+    try {
+      f(jedis)
+    } finally {
+      jedisPool.returnResourceObject(jedis)
+    }
+  }
+
+  private def createPoolConfig(app: Application) : JedisPoolConfig = {
+    val poolConfig : JedisPoolConfig = new JedisPoolConfig()
+    app.configuration.getInt("redis.pool.maxIdle").map { poolConfig.setMaxIdle(_) }
+    app.configuration.getInt("redis.pool.minIdle").map { poolConfig.setMinIdle(_) }
+    app.configuration.getInt("redis.pool.maxActive").map { x => poolConfig.setMaxTotal(x + poolConfig.getMaxIdle()) }
+    app.configuration.getInt("redis.pool.maxWait").map { poolConfig.setMaxWaitMillis(_) }
+    app.configuration.getBoolean("redis.pool.testOnBorrow").map { poolConfig.setTestOnBorrow(_) }
+    app.configuration.getBoolean("redis.pool.testOnReturn").map { poolConfig.setTestOnReturn(_) }
+    app.configuration.getBoolean("redis.pool.testWhileIdle").map { poolConfig.setTestWhileIdle(_) }
+    app.configuration.getLong("redis.pool.timeBetweenEvictionRunsMillis").map { poolConfig.setTimeBetweenEvictionRunsMillis(_) }
+    app.configuration.getInt("redis.pool.numTestsPerEvictionRun").map { poolConfig.setNumTestsPerEvictionRun(_) }
+    app.configuration.getLong("redis.pool.minEvictableIdleTimeMillis").map { poolConfig.setMinEvictableIdleTimeMillis(_) }
+    app.configuration.getLong("redis.pool.softMinEvictableIdleTimeMillis").map { poolConfig.setSoftMinEvictableIdleTimeMillis(_) }
+    app.configuration.getBoolean("redis.pool.lifo").map { poolConfig.setLifo(_) }
+    app.configuration.getBoolean("redis.pool.blockWhenExhausted").map { poolConfig.setBlockWhenExhausted(_) }
+    poolConfig
+  }
 
   override def onStart() {
-    jedis
+    jedisPool
   }
 
   override def onStop(): Unit = {
-    jedis.close()
+    jedisPool.destroy()
   }
 
  override lazy val enabled = {
@@ -99,9 +132,11 @@ class RedisPlugin(app: Application) extends CachePlugin {
        }
        val redisV = prefix + "-" + new String( Base64Coder.encode( baos.toByteArray() ) )
        Logger.trace(s"Setting key ${key} to ${redisV}")
-       
-       jedis.set(key,redisV)
-       if (expiration != 0) jedis.expire(key,expiration)
+
+       withJedisClient { client =>
+         client.set(key, redisV)
+         if (expiration != 0) client.expire(key, expiration)
+       }
      } catch {
        case ex: IOException => Logger.warn("could not serialize key:"+ key + " and value:"+ value.toString + " ex:"+ex.toString)
        case ex: JedisException => Logger.error("cache error", ex)
@@ -112,7 +147,7 @@ class RedisPlugin(app: Application) extends CachePlugin {
 
     }
     def remove(key: String): Unit = try {
-      jedis.del(key)
+      withJedisClient(_.del(key))
     } catch {
       case ex: JedisException => Logger.error("cache error", ex)
     }
@@ -137,7 +172,7 @@ class RedisPlugin(app: Application) extends CachePlugin {
       Logger.trace(s"Reading key ${key}")
 
       try {
-        val rawData = jedis.get(key)
+        val rawData = withJedisClient(_.get(key))
         rawData match {
           case null =>
             None
