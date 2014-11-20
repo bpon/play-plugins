@@ -138,18 +138,24 @@ class RedisPlugin(app: Application) extends CachePlugin {
          if (expiration != 0) client.expire(key, expiration)
        }
      } catch {
-       case ex: IOException => Logger.warn("could not serialize key:"+ key + " and value:"+ value.toString + " ex:"+ex.toString)
-       case ex: JedisException => Logger.error("cache error", ex)
+       case ex: IOException => Logger.warn(s"could not serialize key [$key] and value [$value]", ex)
+       case ex: JedisException => Logger.error(s"cache error while saving key [$key] and value [$value]", ex)
+       case ex =>
+         Logger.error(s"caught ${ex.getClass.getName} while saving key [$key] and value [$value]")
+         throw ex
      } finally {
        if (oos != null) oos.close()
        if (dos != null) dos.close()
      }
-
     }
+
     def remove(key: String): Unit = try {
       withJedisClient(_.del(key))
     } catch {
-      case ex: JedisException => Logger.error("cache error", ex)
+      case ex: JedisException => Logger.error(s"cache error while removing key [$key]", ex)
+      case ex =>
+        Logger.error(s"caught ${ex.getClass.getName} while removing key [$key]")
+        throw ex
     }
 
     class ClassLoaderObjectInputStream(stream:InputStream) extends ObjectInputStream(stream) {
@@ -193,11 +199,14 @@ class RedisPlugin(app: Application) extends CachePlugin {
         }
       } catch {
         case ex: IOException =>
-          Logger.warn("could not deserialize key: "+ key, ex)
+          Logger.warn(s"could not deserialize key [$key]", ex)
           None
         case ex: JedisException =>
-          Logger.error("cache error", ex)
+          Logger.error(s"cache error while getting value for key [$key]", ex)
           None
+        case ex =>
+          Logger.error(s"caught ${ex.getClass.getName} while getting value for key [$key]")
+          throw ex
       }
     }
 
